@@ -1,0 +1,120 @@
+name: Microsoft Lifecycle Power BI Export
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 0'
+      timezone: 'Europe/Brussels'
+
+permissions: {}
+concurrency:
+  group: microsoft-lifecycle-export
+  cancel-in-progress: false
+
+jobs:
+  export:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out lifecycle repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run regression tests
+        run: python -m pytest -q tests
+      - name: Download workbook and export expanded lifecycle CSV
+        run: python -u scripts/transform.py
+      - name: Validate 20 base fields plus 12 expanded lifecycle columns
+        run: |
+          PYTHONPATH=scripts python - <<'PY'
+          from pathlib import Path
+          from release_contract import read_csv
+          from transform import OUTPUT_COLUMNS
+          rows = read_csv(Path('data/normalized/microsoft-lifecycle.csv'), OUTPUT_COLUMNS)
+          assert len(OUTPUT_COLUMNS) == 32
+          assert rows and all(r['RecordId'] and r['ReleaseId'] and r['Title'] for r in rows)
+          assert len({r['RecordId'] for r in rows}) == len(rows)
+          assert all(not r['Description'].lstrip().startswith('{') for r in rows)
+          print(f'Validated {len(rows)} EUC lifecycle records with {len(OUTPUT_COLUMNS)} columns')
+          PY
+      - name: Upload diagnostic artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: euc-lifecycle-diagnostics
+          path: |
+            data/rejected/microsoft-lifecycle-rejected.csv
+            data/metadata/microsoft-lifecycle-*.csv
+            data/logs/microsoft-lifecycle.log
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Upload validated publication files
+        uses: actions/upload-artifact@v6
+        with:
+          name: euc-lifecycle-validated
+          path: |
+            data/normalized/microsoft-lifecycle.csv
+            data/history/microsoft-lifecycle-history.csv
+            data/rejected/microsoft-lifecycle-rejected.csv
+            data/metadata/microsoft-lifecycle-*.csv
+            data/legacy/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish validated outputs to main
+    needs: export
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out clean main branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Download validated publication files
+        uses: actions/download-artifact@v7
+        with:
+          name: euc-lifecycle-validated
+          path: data
+      - name: Commit and publish normalized files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- data/normalized/microsoft-lifecycle.csv \
+            data/history/microsoft-lifecycle-history.csv \
+            data/rejected/microsoft-lifecycle-rejected.csv \
+            data/metadata/microsoft-lifecycle-statistics.csv \
+            data/metadata/microsoft-lifecycle-statistics-history.csv \
+            data/metadata/microsoft-lifecycle-warnings.csv
+          if [ -d data/legacy ]; then
+            git add -A -- data/legacy/
+          fi
+          if git diff --cached --quiet; then
+            echo 'No validated lifecycle changes to publish.'
+            exit 0
+          fi
+          git commit -m 'data: publish expanded EUC lifecycle CSV'
+          # Never rebase a dirty worktree; unlike the exporter, this job
+          # starts fresh and receives only the validated publication files.
+          test -z "$(git status --porcelain)" || {
+            echo 'Uncommitted files remain after publishing selection.' >&2
+            git status --short
+            exit 1
+          }
+          git pull --rebase origin main
+          git push origin HEAD:main
