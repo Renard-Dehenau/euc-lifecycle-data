@@ -1,0 +1,73 @@
+name: Microsoft Lifecycle Power BI Export
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'
+      timezone: 'Europe/Brussels'
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: microsoft-lifecycle-export
+  cancel-in-progress: false
+
+jobs:
+  lifecycle:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run regression tests
+        run: python -m pytest -q tests
+      - name: Download Microsoft workbook and normalize
+        run: python -u scripts/transform.py
+      - name: Validate Power BI contract
+        run: |
+          PYTHONPATH=scripts python - <<'PY'
+          from scripts.release_contract import OUTPUT_COLUMNS, read_csv
+          from pathlib import Path
+          rows = read_csv(Path('data/normalized/microsoft-lifecycle.csv'), OUTPUT_COLUMNS)
+          assert rows and all(r['RecordId'] and r['ReleaseId'] and r['Title'] for r in rows)
+          assert len({r['RecordId'] for r in rows}) == len(rows)
+          print(f'Validated {len(rows)} lifecycle records (20 columns)')
+          PY
+      - name: Upload export and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: euc-lifecycle-powerbi
+          path: |
+            data/normalized/microsoft-lifecycle.csv
+            data/history/microsoft-lifecycle-history.csv
+            data/rejected/microsoft-lifecycle-rejected.csv
+            data/metadata/microsoft-lifecycle-*.csv
+            data/logs/microsoft-lifecycle.log
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Publish validated outputs
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- data/normalized/microsoft-lifecycle.csv \
+            data/history/microsoft-lifecycle-history.csv \
+            data/rejected/microsoft-lifecycle-rejected.csv \
+            data/metadata/microsoft-lifecycle-statistics.csv \
+            data/metadata/microsoft-lifecycle-statistics-history.csv \
+            data/metadata/microsoft-lifecycle-warnings.csv
+          if git diff --cached --quiet; then
+            echo 'No changes to publish.'
+            exit 0
+          fi
+          git commit -m 'data: refresh normalized Microsoft EUC lifecycle'
+          git pull --rebase origin main
+          git push origin HEAD:main
