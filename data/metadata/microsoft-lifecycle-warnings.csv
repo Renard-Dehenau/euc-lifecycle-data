@@ -1,3 +1,2 @@
 ﻿WarningAtUtc;Source;WarningCode;WarningMessage
-2026-11-13T12:24:48Z;EUC_LIFECYCLE;REJECTED_RECORDS;1 of 2943 source records rejected
-2026-11-13T12:24:48Z;EUC_LIFECYCLE;LEGACY_CSV_EXPANDED;"Migrated 2942 historical rows into expanded lifecycle columns; backup: /home/runner/work/euc-lifecycle-data/euc-lifecycle-data/data/legacy/microsoft-lifecycle-history.schema-7b47c65d8559a522.csv"
+2026-11-15T12:20:23Z;EUC_LIFECYCLE;REJECTED_RECORDS;1 of 2943 source records rejected
